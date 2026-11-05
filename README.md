@@ -82,3 +82,5 @@ The JavaScript frontend sends authenticated requests to the PHP API. The API use
 Configure backups, secure MySQL credentials, HTTPS, and operational policies before using real tenant or payment information.
 
 Email messages are recorded as **Not Configured**; delivery requires an email service. The camera feature only displays a local preview. Occupancy counts are entered manually; there is no automated person detection or facial recognition.
+
+# Angelina-s-Dormitory
