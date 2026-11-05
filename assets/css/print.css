@@ -1,0 +1,36 @@
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .modal-backdrop,
+  .modal-backdrop * {
+    visibility: visible !important;
+  }
+
+  .modal-backdrop {
+    position: absolute;
+    inset: 0;
+    display: block;
+    padding: 0;
+    background: #fff;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    box-shadow: none;
+  }
+
+  .modal-header,
+  .modal-actions,
+  .demo-warning {
+    display: none !important;
+  }
+
+  .receipt {
+    max-width: none;
+    padding: 0;
+  }
+}
