@@ -16,7 +16,11 @@ function tenantDashboard() {
 function tenantsPage() {
   const rows = state.tenants.map(tenant => {
     const room = roomById(tenant.roomId);
-    return `<tr><td><div class="cell-primary"><strong>${esc(tenant.name)}</strong><span>${esc(tenant.email)}</span></div></td><td>${esc(tenant.phone || "—")}</td><td>${esc(room?.name || "—")} ${tenant.bed ? `· Bed ${tenant.bed}` : ""}</td><td>${formatDate(tenant.moveIn)}</td><td>${tenant.moveOut ? formatDate(tenant.moveOut) : "—"}</td><td>${badge(tenant.status)}</td><td>${tenant.status === "Active" ? `<button class="text-action" data-action="move-out" data-id="${esc(tenant.id)}">Move out</button>` : "—"}</td></tr>`;
+    const tenantActions = [
+      tenant.email ? `<button class="text-action" data-action="email-tenant-billing-qr" data-id="${esc(tenant.id)}">Send billing QR</button>` : "",
+      tenant.status === "Active" ? `<button class="text-action" data-action="move-out" data-id="${esc(tenant.id)}">Move out</button>` : ""
+    ].filter(Boolean).join(" · ") || "—";
+    return `<tr><td><div class="cell-primary"><strong>${esc(tenant.name)}</strong><span>${esc(tenant.email)}</span></div></td><td>${esc(tenant.phone || "—")}</td><td>${esc(room?.name || "—")} ${tenant.bed ? `· Bed ${tenant.bed}` : ""}</td><td>${formatDate(tenant.moveIn)}</td><td>${tenant.moveOut ? formatDate(tenant.moveOut) : "—"}</td><td>${badge(tenant.status)}</td><td>${tenantActions}</td></tr>`;
   }).join("");
   return `${heading("Tenant management", "Keep tenant contact details, assignments and move-out history.", `<button class="btn btn-primary" data-action="add-tenant">＋ Add tenant</button>`)}<section class="table-card"><div class="table-head"><h2>Tenant records <span class="muted">· ${state.tenants.length}</span></h2><input class="toolbar-search" data-filter="tenant-table" placeholder="Search tenants..." aria-label="Search tenants"></div><div id="tenant-table">${table(["Tenant", "Contact", "Room / bed", "Move-in", "Move-out", "Status", "Action"], rows)}</div></section>`;
 }
@@ -57,7 +61,8 @@ function paymentsTable(payments, title) {
 }
 function paymentsPage() {
   const payments = session.role === "Tenant" ? state.payments.filter(payment => currentTenantBills().some(bill => bill.id === payment.billId)) : state.payments.slice();
-  return `${heading(session.role === "Tenant" ? "My payment history" : "Payment transactions", session.role === "Tenant" ? "Your recorded transactions and payment confirmations." : "Record GCash or personal payments, including partial payments.", "")}${paymentsTable(payments.slice().reverse(), `${payments.length} transaction${payments.length === 1 ? "" : "s"}`)}`;
+  const actions = "";
+  return `${heading(session.role === "Tenant" ? "My payment history" : "Payment transactions", session.role === "Tenant" ? "Your recorded transactions and payment confirmations." : "Record and review tenant payment transactions.", actions)}${paymentsTable(payments.slice().reverse(), `${payments.length} transaction${payments.length === 1 ? "" : "s"}`)}`;
 }
 
 function depositsPage() {

@@ -84,7 +84,7 @@ function db(): PDO
     $db = $config['db'] ?? [];
     $host = (string)($db['host'] ?? '127.0.0.1');
     $port = (string)($db['port'] ?? '3306');
-    $name = (string)($db['name'] ?? 'angelinas_dormitory_app');
+    $name = (string)($db['name'] ?? 'angelinas_dormitory');
     $charset = 'utf8mb4';
     $dsn = "mysql:host={$host};port={$port};dbname={$name};charset={$charset}";
     $connection = new PDO($dsn, (string)($db['user'] ?? 'root'), (string)($db['password'] ?? ''), [
@@ -151,6 +151,167 @@ function recordNotification(PDO $pdo, int $tenantId, string $type): void
     $statement->execute([$tenantId, $type]);
 }
 
+function smtpResponse($socket, array $expectedCodes): string
+{
+    $response = '';
+    do {
+        $line = fgets($socket, 515);
+        if ($line === false) {
+            throw new RuntimeException('The email server closed the connection unexpectedly.');
+        }
+        $response .= $line;
+    } while (isset($line[3]) && $line[3] === '-');
+
+    if (!in_array((int)substr($line, 0, 3), $expectedCodes, true)) {
+        throw new RuntimeException('The email server rejected the request: ' . trim($response));
+    }
+    return $response;
+}
+
+function smtpWrite($socket, string $data, string $failureMessage): void
+{
+    $length = strlen($data);
+    $offset = 0;
+    while ($offset < $length) {
+        $written = fwrite($socket, substr($data, $offset));
+        if ($written === false || $written === 0) {
+            throw new RuntimeException($failureMessage);
+        }
+        $offset += $written;
+    }
+}
+
+function smtpCommand($socket, string $command, array $expectedCodes): string
+{
+    smtpWrite($socket, $command . "\r\n", 'Could not send a command to the email server.');
+    return smtpResponse($socket, $expectedCodes);
+}
+
+function sendBillingQrEmail(array $mail, string $recipient, string $tenantName, string $url, string $image, ?string $period = null): void
+{
+    $host = trim((string)($mail['host'] ?? ''));
+    $port = filter_var($mail['port'] ?? null, FILTER_VALIDATE_INT);
+    $encryption = strtolower((string)($mail['encryption'] ?? 'tls'));
+    $username = (string)($mail['username'] ?? '');
+    $password = preg_replace('/\s+/', '', (string)($mail['password'] ?? ''));
+    $fromEmail = trim((string)($mail['from_email'] ?? ''));
+    $fromName = trim(str_replace(["\r", "\n"], '', (string)($mail['from_name'] ?? "Angelina's Dormitory")));
+    $missingSettings = [];
+    if ($username === '') $missingSettings[] = 'DORM_MAIL_USERNAME';
+    if ($password === '') $missingSettings[] = 'DORM_MAIL_PASSWORD (Gmail App Password)';
+    if (!filter_var($fromEmail, FILTER_VALIDATE_EMAIL)) $missingSettings[] = 'DORM_MAIL_FROM_EMAIL';
+    if ($host === '') $missingSettings[] = 'DORM_MAIL_HOST';
+    if (!$port || $port > 65535) $missingSettings[] = 'DORM_MAIL_PORT';
+    if (!in_array($encryption, ['tls', 'ssl'], true)) $missingSettings[] = 'DORM_MAIL_ENCRYPTION';
+    if ($missingSettings) {
+        fail(503, 'Gmail email settings are missing or invalid: ' . implode(', ', $missingSettings) . '. Set them in config.php or the Apache environment.');
+    }
+    if (!filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
+        fail(422, 'The tenant does not have a valid email address on file.');
+    }
+
+    $transport = $encryption === 'ssl' ? 'ssl://' : 'tcp://';
+    $socket = @stream_socket_client(
+        "{$transport}{$host}:{$port}",
+        $errorCode,
+        $errorMessage,
+        20,
+        STREAM_CLIENT_CONNECT,
+        stream_context_create(['ssl' => ['verify_peer' => true, 'verify_peer_name' => true]])
+    );
+    if ($socket === false) {
+        throw new RuntimeException("Could not connect to the configured email server ({$errorCode}).");
+    }
+
+    stream_set_timeout($socket, 20);
+    try {
+        smtpResponse($socket, [220]);
+        $hello = preg_replace('/[^a-zA-Z0-9.-]/', '', gethostname() ?: 'localhost') ?: 'localhost';
+        smtpCommand($socket, "EHLO {$hello}", [250]);
+        if ($encryption === 'tls') {
+            smtpCommand($socket, 'STARTTLS', [220]);
+            if (stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT) !== true) {
+                throw new RuntimeException('Could not establish a secure connection to the email server.');
+            }
+            smtpCommand($socket, "EHLO {$hello}", [250]);
+        }
+        smtpCommand($socket, 'AUTH LOGIN', [334]);
+        smtpCommand($socket, base64_encode($username), [334]);
+        smtpCommand($socket, base64_encode($password), [235]);
+        smtpCommand($socket, "MAIL FROM:<{$fromEmail}>", [250]);
+        smtpCommand($socket, "RCPT TO:<{$recipient}>", [250, 251]);
+        smtpCommand($socket, 'DATA', [354]);
+
+        $boundary = '=_Angelina_' . bin2hex(random_bytes(16));
+        $encodedName = '=?UTF-8?B?' . base64_encode($fromName) . '?=';
+        $subject = $period === null ? 'Your billing information QR code' : 'Billing statement - ' . $period;
+        $encodedSubject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+        $safeName = htmlspecialchars($tenantName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $statementDescription = $period === null
+            ? 'your billing statements and recorded payments'
+            : 'your ' . htmlspecialchars($period, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ' billing statement';
+        $safeUrl = htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $html = '<!doctype html><html><body style="font-family:Arial,sans-serif;color:#202b3c">'
+            . '<h2>Your billing information QR code</h2><p>Hello ' . $safeName . ',</p>'
+            . '<p>Scan the QR code or open the secure link below to view ' . $statementDescription . '.</p>'
+            . '<p><a href="' . $safeUrl . '"><img src="cid:billing-qr" alt="Scan to open your billing information" width="260" height="260"></a></p>'
+            . '<p><a href="' . $safeUrl . '">Open your billing information</a></p>'
+            . '<p>The page shows your billing statements and payments recorded by the dormitory. Scanning does not submit or record a payment.</p>'
+            . '<p>Keep this email private because anyone with its link can view this tenant billing information.</p></body></html>';
+        $message = implode("\r\n", [
+            "From: {$encodedName} <{$fromEmail}>",
+            "To: <{$recipient}>",
+            "Subject: {$encodedSubject}",
+            'MIME-Version: 1.0',
+            "Content-Type: multipart/related; boundary=\"{$boundary}\"",
+            '',
+            "--{$boundary}",
+            'Content-Type: text/html; charset=UTF-8',
+            'Content-Transfer-Encoding: base64',
+            '',
+            rtrim(chunk_split(base64_encode($html), 76, "\r\n")),
+            "--{$boundary}",
+            'Content-Type: image/gif; name="billing-qr.gif"',
+            'Content-Transfer-Encoding: base64',
+            'Content-ID: <billing-qr>',
+            'Content-Disposition: inline; filename="billing-qr.gif"',
+            '',
+            rtrim(chunk_split(base64_encode($image), 76, "\r\n")),
+            "--{$boundary}--",
+            '',
+        ]);
+        $message = preg_replace('/(?m)^\./', '..', $message);
+        smtpWrite($socket, $message . ".\r\n", 'Could not send the billing QR email.');
+        smtpResponse($socket, [250]);
+        smtpCommand($socket, 'QUIT', [221]);
+    } finally {
+        fclose($socket);
+    }
+}
+
+function tenantBillingUrl(string $token, array $config): string
+{
+    $baseUrl = rtrim((string)($config['app']['base_url'] ?? ''), '/');
+    if ($baseUrl === '') {
+        fail(503, 'Set DORM_APP_URL to the address tenants will use to open billing information.');
+    }
+
+    $parts = parse_url($baseUrl);
+    if (
+        !is_array($parts)
+        || !in_array(strtolower((string)($parts['scheme'] ?? '')), ['http', 'https'], true)
+        || empty($parts['host'])
+        || isset($parts['user'])
+        || isset($parts['pass'])
+        || isset($parts['query'])
+        || isset($parts['fragment'])
+        || in_array(strtolower((string)($parts['host'] ?? '')), ['localhost', '127.0.0.1', '::1'], true)
+    ) {
+        fail(503, 'Set DORM_APP_URL to a valid tenant-accessible HTTP or HTTPS base URL, not localhost.');
+    }
+    return $baseUrl . '/tenant-billing-view.php?token=' . rawurlencode($token);
+}
+
 function loadState(PDO $pdo, array $user): array
 {
     $tenantId = $user['role'] === 'Tenant' ? (int)$user['tenant_id'] : null;
@@ -162,16 +323,16 @@ function loadState(PDO $pdo, array $user): array
         "SELECT t.id, t.full_name AS name, t.phone, t.email, t.status, t.move_in_date AS moveIn,
                 t.move_out_date AS moveOut, r.id AS roomId, r.room_name AS roomName,
                 bs.bed_number AS bed
-        FROM tenants t
-        LEFT JOIN tenant_assignments ta ON ta.id = (
-            SELECT ta2.id FROM tenant_assignments ta2
-            WHERE ta2.tenant_id = t.id
-            ORDER BY (ta2.end_date IS NULL) DESC, ta2.start_date DESC, ta2.id DESC
-            LIMIT 1
-        )
-        LEFT JOIN bed_spaces bs ON bs.id = ta.bed_space_id
-        LEFT JOIN rooms r ON r.id = bs.room_id{$tenantWhere}
-        ORDER BY t.id"
+         FROM tenants t
+         LEFT JOIN tenant_assignments ta ON ta.id = (
+             SELECT ta2.id FROM tenant_assignments ta2
+             WHERE ta2.tenant_id = t.id
+             ORDER BY (ta2.end_date IS NULL) DESC, ta2.start_date DESC, ta2.id DESC
+             LIMIT 1
+         )
+         LEFT JOIN bed_spaces bs ON bs.id = ta.bed_space_id
+         LEFT JOIN rooms r ON r.id = bs.room_id{$tenantWhere}
+         ORDER BY t.id"
     );
     $tenants->execute($idParams);
     $tenantRows = array_map(static function (array $row): array {
@@ -193,8 +354,8 @@ function loadState(PDO $pdo, array $user): array
         "SELECT r.id, r.room_name AS name, r.status,
                 COUNT(bs.id) AS capacity,
                 SUM(CASE WHEN bs.status = 'Occupied' THEN 1 ELSE 0 END) AS occupied
-        FROM rooms r LEFT JOIN bed_spaces bs ON bs.room_id = r.id{$roomWhere}
-        GROUP BY r.id ORDER BY r.room_name"
+         FROM rooms r LEFT JOIN bed_spaces bs ON bs.room_id = r.id{$roomWhere}
+         GROUP BY r.id ORDER BY r.room_name"
     );
     $rooms->execute($idParams);
     $roomRows = array_map(static function (array $row): array {
@@ -211,9 +372,9 @@ function loadState(PDO $pdo, array $user): array
                 COALESCE(SUM(CASE WHEN ba.kind = 'Discount' THEN ba.amount ELSE 0 END), 0) AS discount,
                 COALESCE(SUM(CASE WHEN ba.kind = 'Adjustment' THEN ba.amount ELSE 0 END), 0) AS adjustment,
                 COALESCE(MAX(CASE WHEN ba.kind = 'Adjustment' THEN ba.reason ELSE '' END), '') AS adjustmentReason
-        FROM billing b
-        LEFT JOIN billing_adjustments ba ON ba.billing_id = b.id{$billWhere}
-        GROUP BY b.id ORDER BY b.created_at DESC, b.id DESC"
+         FROM billing b
+         LEFT JOIN billing_adjustments ba ON ba.billing_id = b.id{$billWhere}
+         GROUP BY b.id ORDER BY b.created_at DESC, b.id DESC"
     );
     $bills->execute($idParams);
     $billRows = array_map(static function (array $row): array {
@@ -226,10 +387,10 @@ function loadState(PDO $pdo, array $user): array
     $payments = $pdo->prepare(
         "SELECT p.id, p.billing_id AS billId, p.amount, p.method, p.payment_date AS date,
                 p.reference, p.payer_name AS payer, COALESCE(u.username, 'Former user') AS receiver
-        FROM payments p
-        JOIN billing b ON b.id = p.billing_id
-        LEFT JOIN users u ON u.id = p.received_by{$billWhere}
-        ORDER BY p.payment_date DESC, p.id DESC"
+         FROM payments p
+         JOIN billing b ON b.id = p.billing_id
+         LEFT JOIN users u ON u.id = p.received_by{$billWhere}
+         ORDER BY p.payment_date DESC, p.id DESC"
     );
     $payments->execute($idParams);
     $paymentRows = array_map(static function (array $row): array {
@@ -240,7 +401,7 @@ function loadState(PDO $pdo, array $user): array
 
     $deposits = $pdo->prepare(
         'SELECT id, tenant_id AS tenantId, amount, received_date AS date, status, refund_amount AS refund
-        FROM deposits' . ($tenantId ? ' WHERE tenant_id = :tenant_id' : '') . ' ORDER BY id DESC'
+         FROM deposits' . ($tenantId ? ' WHERE tenant_id = :tenant_id' : '') . ' ORDER BY id DESC'
     );
     $deposits->execute($idParams);
     $depositRows = array_map(static function (array $row): array {
@@ -252,7 +413,7 @@ function loadState(PDO $pdo, array $user): array
     $concerns = $pdo->prepare(
         'SELECT id, tenant_id AS tenantId, category, subject, message, status,
                 owner_response AS response, DATE(created_at) AS date
-        FROM tenant_concerns' . ($tenantId ? ' WHERE tenant_id = :tenant_id' : '') . ' ORDER BY id DESC'
+         FROM tenant_concerns' . ($tenantId ? ' WHERE tenant_id = :tenant_id' : '') . ' ORDER BY id DESC'
     );
     $concerns->execute($idParams);
     $concernRows = array_map(static function (array $row): array {
@@ -272,14 +433,14 @@ function loadState(PDO $pdo, array $user): array
         }, $pdo->query(
             "SELECT s.id, s.room_id AS roomId, s.observed_count AS `count`, s.capacity,
                     s.scan_date AS date, s.note, COALESCE(u.username, 'Former user') AS actor
-            FROM occupancy_scans s LEFT JOIN users u ON u.id = s.recorded_by
-            ORDER BY s.scan_date DESC, s.id DESC"
+             FROM occupancy_scans s LEFT JOIN users u ON u.id = s.recorded_by
+             ORDER BY s.scan_date DESC, s.id DESC"
         )->fetchAll());
 
     $notifications = $pdo->prepare(
         'SELECT id, tenant_id AS tenantId, notification_type AS type,
                 delivery_status AS status, created_at AS date
-        FROM notifications' . ($tenantId ? ' WHERE tenant_id = :tenant_id' : '') . ' ORDER BY id DESC'
+         FROM notifications' . ($tenantId ? ' WHERE tenant_id = :tenant_id' : '') . ' ORDER BY id DESC'
     );
     $notifications->execute($idParams);
     $notificationRows = array_map(static function (array $row): array {
@@ -300,8 +461,8 @@ function loadState(PDO $pdo, array $user): array
         }, $pdo->query(
             'SELECT a.id, a.action AS message, COALESCE(u.username, "System") AS actor,
                     a.created_at AS date
-            FROM audit_logs a LEFT JOIN users u ON u.id = a.user_id
-            ORDER BY a.id DESC LIMIT 150'
+             FROM audit_logs a LEFT JOIN users u ON u.id = a.user_id
+             ORDER BY a.id DESC LIMIT 150'
         )->fetchAll());
     }
     if ($user['role'] === 'Admin') {
@@ -311,7 +472,7 @@ function loadState(PDO $pdo, array $user): array
             return $row;
         }, $pdo->query(
             "SELECT id, username, role, status, created_at AS createdAt
-            FROM users WHERE role IN ('Admin', 'Staff') ORDER BY role, username"
+             FROM users WHERE role IN ('Admin', 'Staff') ORDER BY role, username"
         )->fetchAll());
     }
     $registrationRows = [];
@@ -322,7 +483,7 @@ function loadState(PDO $pdo, array $user): array
         }, $pdo->query(
             'SELECT id, username, role, full_name AS fullName, phone, email,
                     move_in_date AS moveIn, created_at AS createdAt
-            FROM registration_requests ORDER BY created_at, id'
+             FROM registration_requests ORDER BY created_at, id'
         )->fetchAll());
     }
 
@@ -339,9 +500,10 @@ function loadState(PDO $pdo, array $user): array
     ];
 }
 
-function applyAction(PDO $pdo, array $user, array $data, string $action): void
+function applyAction(PDO $pdo, array $user, array $data, string $action): ?int
 {
     $userId = (int)$user['id'];
+    $createdTenantId = null;
     switch ($action) {
         case 'approve_registration':
             requireRole(['Admin']);
@@ -359,6 +521,10 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
                 $pdo->prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)')
                     ->execute([$request['username'], $request['password_hash'], 'Staff']);
             } else {
+                $tenantEmail = trim((string)($data['email'] ?? $request['email'] ?? ''));
+                if (!$tenantEmail || !filter_var($tenantEmail, FILTER_VALIDATE_EMAIL) || mb_strlen($tenantEmail) > 190) {
+                    fail(422, 'This tenant registration needs a valid email address before approval.');
+                }
                 $roomId = filter_var($data['roomId'] ?? null, FILTER_VALIDATE_INT);
                 $bedNumber = filter_var($data['bed'] ?? null, FILTER_VALIDATE_INT);
                 if (!$roomId || !$bedNumber || !$request['move_in_date']) {
@@ -366,8 +532,8 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
                 }
                 $bed = $pdo->prepare(
                     "SELECT bs.id FROM bed_spaces bs JOIN rooms r ON r.id = bs.room_id
-                    WHERE bs.room_id = ? AND bs.bed_number = ?
-                    AND bs.status = 'Available' AND r.status = 'Open' FOR UPDATE"
+                     WHERE bs.room_id = ? AND bs.bed_number = ?
+                       AND bs.status = 'Available' AND r.status = 'Open' FOR UPDATE"
                 );
                 $bed->execute([$roomId, $bedNumber]);
                 $bedId = $bed->fetchColumn();
@@ -375,14 +541,15 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
 
                 $pdo->prepare(
                     "INSERT INTO tenants (full_name, phone, email, status, move_in_date)
-                    VALUES (?, ?, ?, 'Active', ?)"
+                     VALUES (?, ?, ?, 'Active', ?)"
                 )->execute([
                     $request['full_name'],
                     $request['phone'] ?: null,
-                    $request['email'] ?: null,
+                    $tenantEmail,
                     $request['move_in_date'],
                 ]);
                 $tenantId = (int)$pdo->lastInsertId();
+                $createdTenantId = $tenantId;
                 $pdo->prepare('INSERT INTO users (tenant_id, username, password_hash, role) VALUES (?, ?, ?, ?)')
                     ->execute([$tenantId, $request['username'], $request['password_hash'], 'Tenant']);
                 $pdo->prepare('INSERT INTO tenant_assignments (tenant_id, bed_space_id, start_date) VALUES (?, ?, ?)')
@@ -434,7 +601,9 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
             if (!$roomId || !$bedNumber || $bedNumber < 1) fail(422, 'Select an available room and bed.');
             $phone = trim((string)($data['phone'] ?? ''));
             $email = trim((string)($data['email'] ?? ''));
-            if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) fail(422, 'Enter a valid email address.');
+            if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190) {
+                fail(422, 'Enter a valid tenant email address so the billing QR can be sent.');
+            }
             $username = requiredString($data, 'username', 80);
             if (!preg_match('/^[a-zA-Z0-9._-]{3,80}$/', $username)) {
                 fail(422, 'Tenant usernames must be 3–80 letters, numbers, dots, underscores or hyphens.');
@@ -449,18 +618,19 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
             $moveIn = validDate($data, 'moveIn');
             $bed = $pdo->prepare(
                 "SELECT bs.id FROM bed_spaces bs JOIN rooms r ON r.id = bs.room_id
-                WHERE bs.room_id = ? AND bs.bed_number = ? AND bs.status = 'Available' AND r.status = 'Open'
-                FOR UPDATE"
+                 WHERE bs.room_id = ? AND bs.bed_number = ? AND bs.status = 'Available' AND r.status = 'Open'
+                 FOR UPDATE"
             );
             $bed->execute([$roomId, $bedNumber]);
             $bedId = $bed->fetchColumn();
             if (!$bedId) fail(409, 'That bed space is no longer available.');
             $insert = $pdo->prepare(
                 "INSERT INTO tenants (full_name, phone, email, status, move_in_date)
-                VALUES (?, ?, ?, 'Active', ?)"
+                 VALUES (?, ?, ?, 'Active', ?)"
             );
             $insert->execute([$name, $phone ?: null, $email ?: null, $moveIn]);
             $tenantId = (int)$pdo->lastInsertId();
+            $createdTenantId = $tenantId;
             $pdo->prepare('INSERT INTO users (tenant_id, username, password_hash, role) VALUES (?, ?, ?, ?)')
                 ->execute([$tenantId, $username, password_hash($password, PASSWORD_DEFAULT), 'Tenant']);
             $pdo->prepare("INSERT INTO tenant_assignments (tenant_id, bed_space_id, start_date) VALUES (?, ?, ?)")
@@ -503,7 +673,7 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
             }
             $pdo->prepare(
                 'INSERT INTO billing (tenant_id, billing_period, cutoff_date, due_date, rent, electricity, water, previous_balance)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
             )->execute([$tenantId, $period, $cutoff, $due, $rent, $electricity, $water, $previous]);
             $billId = (int)$pdo->lastInsertId();
             $addAdjustment = $pdo->prepare(
@@ -527,8 +697,8 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
                 "SELECT b.id, b.tenant_id, b.rent + b.electricity + b.water + b.previous_balance
                     + COALESCE(SUM(CASE WHEN a.kind = 'Adjustment' THEN a.amount ELSE -a.amount END), 0) AS total_due,
                     COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.billing_id = b.id), 0) AS total_paid
-                FROM billing b LEFT JOIN billing_adjustments a ON a.billing_id = b.id
-                WHERE b.id = ? GROUP BY b.id FOR UPDATE"
+                 FROM billing b LEFT JOIN billing_adjustments a ON a.billing_id = b.id
+                 WHERE b.id = ? GROUP BY b.id FOR UPDATE"
             );
             $billStatement->execute([$billId]);
             $bill = $billStatement->fetch();
@@ -544,7 +714,7 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
             $reference = trim((string)($data['reference'] ?? ''));
             $pdo->prepare(
                 'INSERT INTO payments (billing_id, amount, method, payment_date, reference, payer_name, received_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?)'
+                 VALUES (?, ?, ?, ?, ?, ?, ?)'
             )->execute([$billId, $paymentAmount, $method, $date, $reference ?: null, $payer, $userId]);
             recordNotification($pdo, (int)$bill['tenant_id'], 'Payment receipt');
             recordAudit($pdo, $userId, "Recorded payment {$paymentAmount} for bill #{$billId}");
@@ -625,8 +795,8 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
                 ->execute([$date, $tenantId]);
             $pdo->prepare(
                 'UPDATE bed_spaces bs JOIN tenant_assignments ta ON ta.bed_space_id = bs.id
-                SET bs.status = \'Available\', ta.end_date = ?
-                WHERE ta.tenant_id = ? AND ta.end_date IS NULL'
+                 SET bs.status = \'Available\', ta.end_date = ?
+                 WHERE ta.tenant_id = ? AND ta.end_date IS NULL'
             )->execute([$date, $tenantId]);
             recordAudit($pdo, $userId, "Recorded move-out for tenant #{$tenantId}; history retained");
             break;
@@ -644,7 +814,7 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
             $note = trim((string)($data['note'] ?? ''));
             $pdo->prepare(
                 'INSERT INTO occupancy_scans (room_id, observed_count, capacity, scan_date, note, recorded_by)
-                VALUES (?, ?, ?, ?, ?, ?)'
+                 VALUES (?, ?, ?, ?, ?, ?)'
             )->execute([$roomId, $count, $capacity, $date, $note ?: null, $userId]);
             recordAudit($pdo, $userId, "Recorded occupancy count {$count} for room #{$roomId}");
             break;
@@ -652,6 +822,7 @@ function applyAction(PDO $pdo, array $user, array $data, string $action): void
         default:
             fail(404, 'Unknown API action.');
     }
+    return $createdTenantId;
 }
 
 try {
@@ -676,6 +847,95 @@ try {
     if ($method === 'POST') {
         verifyCsrf();
         $data = input();
+        if ($action === 'create_tenant_billing_qr') {
+            $user = requireRole(['Admin']);
+            $tenantId = filter_var($data['tenantId'] ?? null, FILTER_VALIDATE_INT);
+            if (!$tenantId) fail(422, 'Tenant record not found.');
+            $pdo = db();
+            $tenant = $pdo->prepare('SELECT id, email FROM tenants WHERE id = ?');
+            $tenant->execute([(int)$tenantId]);
+            $tenantRow = $tenant->fetch();
+            if (!$tenantRow) fail(404, 'Tenant record not found.');
+            if (!$tenantRow['email'] || !filter_var($tenantRow['email'], FILTER_VALIDATE_EMAIL)) {
+                fail(422, 'This tenant does not have a valid email address on file.');
+            }
+            $config = require dirname(__DIR__) . '/config.php';
+            $token = bin2hex(random_bytes(32));
+            $publicUrl = tenantBillingUrl($token, $config);
+            $pdo->prepare('INSERT INTO tenant_billing_qr_codes (tenant_id, token_hash) VALUES (?, ?)')
+                ->execute([(int)$tenantId, hash('sha256', $token)]);
+            recordAudit($pdo, (int)$user['id'], "Generated a billing information QR for tenant #{$tenantId}");
+            respond([
+                'token' => $token,
+                'publicUrl' => $publicUrl,
+                'email' => $tenantRow['email'],
+            ]);
+        }
+        if ($action === 'email_tenant_billing_qr') {
+            $user = requireRole(['Admin']);
+            $tenantId = filter_var($data['tenantId'] ?? null, FILTER_VALIDATE_INT);
+            $token = (string)($data['token'] ?? '');
+            $imageData = (string)($data['imageDataUrl'] ?? '');
+            if (!$tenantId || !preg_match('/^[a-f0-9]{64}$/i', $token)) {
+                fail(422, 'Tenant billing QR details are invalid.');
+            }
+            if (!preg_match('#^data:image/gif;base64,([A-Za-z0-9+/]+={0,2})$#', $imageData, $imageMatch)) {
+                fail(422, 'The tenant billing QR image is invalid.');
+            }
+            $image = base64_decode($imageMatch[1], true);
+            if (
+                $image === false
+                || strlen($image) > 1024 * 1024
+                || !in_array(substr($image, 0, 6), ['GIF87a', 'GIF89a'], true)
+            ) {
+                fail(422, 'The tenant billing QR image is invalid.');
+            }
+
+            $pdo = db();
+            $statement = $pdo->prepare(
+                'SELECT t.full_name, t.email
+                 FROM tenants t
+                 JOIN tenant_billing_qr_codes q ON q.tenant_id = t.id
+                 WHERE t.id = ? AND q.token_hash = ? LIMIT 1'
+            );
+            $statement->execute([(int)$tenantId, hash('sha256', strtolower($token))]);
+            $tenant = $statement->fetch();
+            if (!$tenant) fail(404, 'Tenant billing QR not found. Generate a new QR and try again.');
+            if (!$tenant['email'] || !filter_var($tenant['email'], FILTER_VALIDATE_EMAIL)) {
+                fail(422, 'This tenant does not have a valid email address on file.');
+            }
+            $config = require dirname(__DIR__) . '/config.php';
+            $url = tenantBillingUrl($token, $config);
+            $pdo->prepare(
+                "INSERT INTO notifications (tenant_id, notification_type, delivery_status)
+                 VALUES (?, 'Tenant billing QR', 'Queued')"
+            )->execute([(int)$tenantId]);
+            $notificationId = (int)$pdo->lastInsertId();
+            try {
+                sendBillingQrEmail(
+                    $config['mail'] ?? [],
+                    $tenant['email'],
+                    $tenant['full_name'],
+                    $url,
+                    $image
+                );
+            } catch (ApiError $error) {
+                $pdo->prepare("UPDATE notifications SET delivery_status = 'Failed' WHERE id = ?")
+                    ->execute([$notificationId]);
+                throw $error;
+            } catch (Throwable $error) {
+                $pdo->prepare("UPDATE notifications SET delivery_status = 'Failed' WHERE id = ?")
+                    ->execute([$notificationId]);
+                error_log('Angelina Dormitory tenant billing QR email error: ' . $error->getMessage());
+                fail(502, 'The tenant billing QR email could not be sent. Check Gmail SMTP settings and the PHP error log.');
+            }
+            $pdo->prepare('DELETE FROM tenant_billing_qr_codes WHERE tenant_id = ? AND token_hash <> ?')
+                ->execute([(int)$tenantId, hash('sha256', strtolower($token))]);
+            $pdo->prepare("UPDATE notifications SET delivery_status = 'Sent' WHERE id = ?")
+                ->execute([$notificationId]);
+            recordAudit($pdo, (int)$user['id'], "Emailed billing information QR to tenant #{$tenantId}");
+            respond(['ok' => true, 'email' => $tenant['email']]);
+        }
         if ($action === 'register') {
             $role = (string)($data['role'] ?? '');
             if (!in_array($role, ['Staff', 'Tenant'], true)) fail(422, 'Choose Staff or Tenant as the account type.');
@@ -694,8 +954,13 @@ try {
             $phone = trim((string)($data['phone'] ?? ''));
             if (mb_strlen($phone) > 40) fail(422, 'The phone number is too long.');
             $email = trim((string)($data['email'] ?? ''));
-            if ($email !== '' && (!filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190)) {
-                fail(422, 'Enter a valid email address.');
+            if (
+                ($role === 'Tenant' && $email === '')
+                || ($email !== '' && (!filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190))
+            ) {
+                fail(422, $role === 'Tenant'
+                    ? 'Enter a valid email address so the tenant billing QR can be sent after approval.'
+                    : 'Enter a valid email address.');
             }
             $moveIn = null;
             if ($role === 'Tenant') $moveIn = validDate($data, 'moveIn');
@@ -705,14 +970,14 @@ try {
             try {
                 $existing = $pdo->prepare(
                     'SELECT username FROM users WHERE username = ?
-                    UNION ALL SELECT username FROM registration_requests WHERE username = ? LIMIT 1'
+                     UNION ALL SELECT username FROM registration_requests WHERE username = ? LIMIT 1'
                 );
                 $existing->execute([$username, $username]);
                 if ($existing->fetchColumn()) fail(409, 'That username is already in use or awaiting review.');
                 $pdo->prepare(
                     'INSERT INTO registration_requests
-                    (username, password_hash, role, full_name, phone, email, move_in_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)'
+                     (username, password_hash, role, full_name, phone, email, move_in_date)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)'
                 )->execute([
                     $username, password_hash($password, PASSWORD_DEFAULT), $role,
                     $fullName, $phone ?: null, $email ?: null, $moveIn,
@@ -737,7 +1002,7 @@ try {
                 fail(422, 'The passwords do not match.');
             }
             $pdo = db();
-            $lock = $pdo->query("SELECT GET_LOCK('angelinas_dormitory_app_initial_admin', 5)")->fetchColumn();
+            $lock = $pdo->query("SELECT GET_LOCK('angelinas_dormitory_initial_admin', 5)")->fetchColumn();
             if ((int)$lock !== 1) fail(503, 'First-run setup is busy. Please try again.');
             try {
                 if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() !== 0) {
@@ -750,7 +1015,7 @@ try {
                 recordAudit($pdo, $userId, 'Created the first Admin account');
                 $pdo->commit();
             } finally {
-                $pdo->query("SELECT RELEASE_LOCK('angelinas_dormitory_app_initial_admin')");
+                $pdo->query("SELECT RELEASE_LOCK('angelinas_dormitory_initial_admin')");
             }
             session_regenerate_id(true);
             $_SESSION['csrf'] = bin2hex(random_bytes(32));
@@ -767,7 +1032,7 @@ try {
             $pdo = db();
             $statement = $pdo->prepare(
                 "SELECT id, username, password_hash, role, tenant_id
-                FROM users WHERE username = ? AND role = ? AND status = 'Active' LIMIT 1"
+                 FROM users WHERE username = ? AND role = ? AND status = 'Active' LIMIT 1"
             );
             $statement->execute([$username, $role]);
             $account = $statement->fetch();
@@ -816,13 +1081,17 @@ try {
         $pdo = db();
         $pdo->beginTransaction();
         try {
-            applyAction($pdo, $user, $data, $action);
+            $createdTenantId = applyAction($pdo, $user, $data, $action);
             $pdo->commit();
         } catch (Throwable $error) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             throw $error;
         }
-        respond(['ok' => true, ...loadState($pdo, $user)]);
+        respond([
+            'ok' => true,
+            ...($createdTenantId === null ? [] : ['createdTenantId' => $createdTenantId]),
+            ...loadState($pdo, $user),
+        ]);
     }
 
     if ($method === 'GET' && $action === 'state') {

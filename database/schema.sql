@@ -1,8 +1,8 @@
-CREATE DATABASE IF NOT EXISTS angelinas_dormitory_app
+CREATE DATABASE IF NOT EXISTS angelinas_dormitory
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_unicode_ci;
 
-USE angelinas_dormitory_app;
+USE angelinas_dormitory;
 
 CREATE TABLE IF NOT EXISTS tenants (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -126,6 +126,29 @@ CREATE TABLE IF NOT EXISTS payments (
     ON UPDATE CASCADE ON DELETE RESTRICT,
   CONSTRAINT fk_payments_receiver FOREIGN KEY (received_by) REFERENCES users(id)
     ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS billing_qr_codes (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  billing_id BIGINT UNSIGNED NOT NULL,
+  payment_id BIGINT UNSIGNED NULL,
+  token_hash CHAR(64) NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_billing_qr_bill (billing_id),
+  CONSTRAINT fk_billing_qr_bill FOREIGN KEY (billing_id) REFERENCES billing(id)
+    ON UPDATE CASCADE ON DELETE CASCADE,
+  CONSTRAINT fk_billing_qr_payment FOREIGN KEY (payment_id) REFERENCES payments(id)
+    ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS tenant_billing_qr_codes (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  token_hash CHAR(64) NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_tenant_billing_qr_tenant (tenant_id),
+  CONSTRAINT fk_tenant_billing_qr_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+    ON UPDATE CASCADE ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS deposits (

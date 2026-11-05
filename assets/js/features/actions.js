@@ -1,11 +1,71 @@
 "use strict";
 
+function billingQrImage(url) {
+  if (typeof qrcode !== "function") throw new Error("QR generator did not load. Check your internet connection and try again.");
+  const code = qrcode(0, "M");
+  code.addData(url, "Byte");
+  code.make();
+  return code.createDataURL(8, 4);
+}
+
 async function finishSave(message, action, data = {}) {
   try {
     await apiMutation(action, data);
     closeModal();
     renderPage();
     showToast(message);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function deliverTenantBillingQr(tenantId) {
+  const tenant = tenantById(String(tenantId));
+  if (!tenant?.email) throw new Error("This tenant does not have a valid email address on file.");
+  const qr = await apiRequest("create_tenant_billing_qr", {
+    method: "POST",
+    body: { tenantId }
+  });
+  const result = await apiRequest("email_tenant_billing_qr", {
+    method: "POST",
+    body: {
+      tenantId,
+      token: qr.token,
+      imageDataUrl: billingQrImage(qr.publicUrl)
+    }
+  });
+  return result.email;
+}
+
+async function emailTenantBillingQr(id) {
+  const tenant = tenantById(id);
+  if (!tenant?.email) return showToast("This tenant does not have a valid email address.", true);
+  if (!window.confirm(`Send a billing QR to ${tenant.email}? This replaces the previous QR link. Anyone with the new link can view this tenant's billing information.`)) return;
+  try {
+    showToast(`Preparing billing QR for ${tenant.email}...`);
+    const email = await deliverTenantBillingQr(tenant.id);
+    showToast(`Billing QR sent to ${email}.`);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function saveNewTenantAndSendQr(action, data, successMessage) {
+  try {
+    const result = await apiMutation(action, data);
+    closeModal();
+    renderPage();
+    if (!result.createdTenantId) {
+      showToast(successMessage);
+      return;
+    }
+    showToast(`${successMessage} Sending billing QR...`);
+    try {
+      const email = await deliverTenantBillingQr(result.createdTenantId);
+      showToast(`Tenant saved. Billing QR sent to ${email}.`);
+    } catch (error) {
+      showToast(`Tenant saved, but the billing QR email failed: ${error.message} You can retry from Tenant management.`, true);
+    }
   } catch (error) {
     showToast(error.message, true);
   }

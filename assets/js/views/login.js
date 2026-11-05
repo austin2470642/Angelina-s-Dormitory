@@ -85,7 +85,7 @@ function registrationScreen() {
             <div class="field"><label for="registration-name">Full name</label><input id="registration-name" name="fullName" required maxlength="120" autocomplete="name"></div>
             <div class="field"><label for="registration-username">Username</label><input id="registration-username" name="username" required minlength="3" maxlength="80" autocomplete="username"></div>
             <div class="field"><label for="registration-phone">Contact number (optional)</label><input id="registration-phone" name="phone" maxlength="40" autocomplete="tel"></div>
-            <div class="field"><label for="registration-email">Email (optional)</label><input id="registration-email" name="email" type="email" maxlength="190" autocomplete="email"></div>
+            <div class="field"><label for="registration-email">Email address (required for Tenant)</label><input id="registration-email" name="email" type="email" maxlength="190" autocomplete="email"></div>
             <div id="tenant-registration-fields" hidden><div class="field"><label for="registration-move-in">Requested move-in date</label><input id="registration-move-in" name="moveIn" type="date"></div></div>
             <div class="field"><label for="registration-password">Password</label><input id="registration-password" name="password" type="password" required minlength="8" maxlength="100" autocomplete="new-password"></div>
             <div class="field"><label for="registration-confirm-password">Confirm password</label><input id="registration-confirm-password" name="confirmPassword" type="password" required minlength="8" maxlength="100" autocomplete="new-password"></div>
@@ -100,10 +100,12 @@ function registrationScreen() {
   const form = document.getElementById("registration-form");
   const tenantFields = document.getElementById("tenant-registration-fields");
   const moveIn = form.elements.moveIn;
+  const email = form.elements.email;
   const updateTenantFields = () => {
     const isTenant = form.elements.role.value === "Tenant";
     tenantFields.hidden = !isTenant;
     moveIn.required = isTenant;
+    email.required = isTenant;
   };
   form.elements.role.addEventListener("change", updateTenantFields);
   updateTenantFields();

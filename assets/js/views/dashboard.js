@@ -9,7 +9,7 @@ function appShell() {
         <div class="nav-caption">Workspace</div>
         <nav class="nav-list" aria-label="Main navigation">${menu.map(([key, icon, title]) => `<button class="nav-item${activePage === key ? " active" : ""}" data-page="${key}"><span class="nav-icon">${icon}</span>${title}</button>`).join("")}</nav>
         <div class="sidebar-bottom">
-          <div class="sidebar-note">Data is saved in the dormitory database. Email alerts and automatic camera counting are not configured.</div>
+          <div class="sidebar-note">Data is saved in the dormitory database. Tenant billing QR email requires server mail configuration.</div>
           <div class="profile-row"><div class="avatar">${esc(initials(session.name))}</div><div class="profile-meta"><strong>${esc(session.name)}</strong><span>${esc(session.role)} account</span></div><button class="logout-button" data-action="logout" aria-label="Sign out" title="Sign out">↗</button></div>
         </div>
       </aside>

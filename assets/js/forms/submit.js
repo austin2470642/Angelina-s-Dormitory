@@ -51,7 +51,12 @@ async function handleFormSubmit(event) {
   if (form.id === "account-form") {
     await finishSave("User account created.", "create_account", data);
   } else if (form.id === "registration-approval-form") {
-    await finishSave("Registration approved and account activated.", "approve_registration", { ...data, id: form.dataset.id });
+    const request = state.registrationRequests.find(item => item.id === form.dataset.id);
+    if (request?.role === "Tenant") {
+      await saveNewTenantAndSendQr("approve_registration", { ...data, id: form.dataset.id }, "Tenant registration approved.");
+    } else {
+      await finishSave("Registration approved and account activated.", "approve_registration", { ...data, id: form.dataset.id });
+    }
   } else if (form.id === "tenant-form") {
     const room = roomById(data.roomId);
     const bedTaken = state.tenants.some(
@@ -60,7 +65,7 @@ async function handleFormSubmit(event) {
     if (!room || !data.bed || Number(data.bed) > Number(room.capacity) || bedTaken) {
       return showToast("That bed space is no longer available. Choose an available bed.", true);
     }
-    await finishSave("Tenant record saved.", "create_tenant", data);
+    await saveNewTenantAndSendQr("create_tenant", data, "Tenant record saved.");
   } else if (form.id === "room-form") {
     if (state.rooms.some(room => room.name.toLowerCase() === data.name.trim().toLowerCase())) {
       return showToast("A room with that name already exists.", true);
@@ -81,7 +86,7 @@ async function handleFormSubmit(event) {
     if (bill.adjustment !== 0 && !bill.adjustmentReason.trim()) {
       return showToast("Enter a reason for the billing adjustment.", true);
     }
-    await finishSave("Billing statement created. No email was sent.", "create_bill", data);
+    await finishSave("Billing statement created. It is now available through the tenant's billing QR.", "create_bill", data);
   } else if (form.id === "payment-form") {
     const bill = billById(data.billId);
     const paymentAmount = Number(data.amount);

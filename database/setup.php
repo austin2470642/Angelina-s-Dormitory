@@ -16,7 +16,7 @@ $config = require $configPath;
 $db = $config['db'] ?? [];
 $host = (string)($db['host'] ?? '127.0.0.1');
 $port = (string)($db['port'] ?? '3306');
-$name = (string)($db['name'] ?? 'angelinas_dormitory_app');
+$name = (string)($db['name'] ?? 'angelinas_dormitory');
 $pdo = null;
 
 try {

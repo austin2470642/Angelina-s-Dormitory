@@ -22,8 +22,11 @@ document.addEventListener("click", event => {
     loginScreen();
   } else if (action === "logout") {
     logout();
-  } else if (action === "close-modal") closeModal();
-  else if (action === "backdrop-close" && event.target === button) closeModal();
+  } else if (action === "close-modal") {
+    closeModal();
+  } else if (action === "backdrop-close" && event.target === button) {
+    closeModal();
+  }
   else if (action === "add-tenant") addTenantModal();
   else if (action === "add-account") addAccountModal();
   else if (action === "approve-registration") reviewRegistration(id);
@@ -39,6 +42,7 @@ document.addEventListener("click", event => {
   else if (action === "refund-deposit") refundDeposit(id);
   else if (action === "receipt") receiptModal(id);
   else if (action === "payment-receipt") paymentReceiptModal(id);
+  else if (action === "email-tenant-billing-qr") emailTenantBillingQr(id);
   else if (action === "open-camera") openCamera();
   else if (action === "close-camera") closeCamera();
   else if (action === "print-receipt") window.print();
